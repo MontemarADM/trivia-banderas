@@ -686,28 +686,37 @@ function say(txt,{rate=null,pitch=null,cb=null}={}){
     u.rate  = rate  != null ? rate  : S.rate;
     u.pitch = pitch != null ? pitch : S.pitch;
     u.volume=1;
-    let cerrado=false;
-    const fin=()=>{ if(cerrado) return; cerrado=true; hablando=false; if(cb) cb(); };
+    let cerrado=false, guardia=null;
+    const fin=()=>{
+      if(cerrado) return;                 // una sola vez por frase, pase lo que pase
+      cerrado=true; hablando=false;
+      if(guardia){ clearTimeout(guardia); guardia=null; }   // se apaga la red de seguridad
+      if(cb) cb();
+    };
     u.onend=fin;
-    u.onerror=e=>{ fallosSeguidos++; fin(); };
+    u.onerror=()=>{ fallosSeguidos++; fin(); };
     u.onstart=()=>{ hablando=true; fallosSeguidos=0; };
-    // red de seguridad: si el motor no responde, no dejamos el juego esperando
-    const limite = Math.max(2500, txt.length*110);
-    setTimeout(()=>{ if(!cerrado){ fallosSeguidos++; fin(); } }, limite);
+    // Red de seguridad: solo actúa si el motor NUNCA respondió.
+    const limite = Math.max(4000, txt.length*160);
+    guardia=setTimeout(()=>{ if(!cerrado){ fallosSeguidos++; fin(); } }, limite);
+    ultimoIntento=Date.now();
     speechSynthesis.speak(u);
     vigilar();
   }catch(e){ if(cb) setTimeout(cb,100); }
 }
 
 /* --- Android: el motor se cuelga y hay que reanimarlo --- */
-let hablando=false, fallosSeguidos=0, vigilante=null;
+let hablando=false, fallosSeguidos=0, vigilante=null, ultimoIntento=0;
 function despertarVoz(){
   try{
     if(speechSynthesis.paused) speechSynthesis.resume();
-    // si dice estar hablando pero nada suena, la cola quedó trabada
-    if(speechSynthesis.speaking && !hablando) speechSynthesis.cancel();
-    // tras varios fallos seguidos, reinicio completo del motor
-    if(fallosSeguidos>=2){ speechSynthesis.cancel(); fallosSeguidos=0; setTimeout(cargarVoces,60); }
+    // Solo destrabamos si el motor lleva un buen rato diciendo que habla sin que
+    // suene nada. NUNCA cancelamos una frase recién encolada: eso borraba las
+    // anteriores y hacía que solo se escuchara la última opción.
+    if(speechSynthesis.speaking && !hablando && (Date.now()-ultimoIntento)>4000){
+      speechSynthesis.cancel();
+    }
+    if(fallosSeguidos>=3){ speechSynthesis.cancel(); fallosSeguidos=0; setTimeout(cargarVoces,60); }
   }catch(e){}
 }
 function vigilar(){
@@ -944,9 +953,28 @@ function leerOpciones(arrancarTimer){
   const listo=()=>{ if(hecho||token!==qid) return; hecho=true;
     if(arrancarTimer && !S.calma && !respondido) iniciarTimer(); };
   if(!S.voice || !TTS){ listo(); return; }
-  // lee únicamente los tres nombres y luego queda en silencio
-  nombres.forEach((n,i)=> say(n,{cb: i===nombres.length-1?listo:null}) );
-  setTimeout(listo, 8000);
+
+  // Se leen ENCADENADOS: recién cuando termina un nombre empieza el siguiente.
+  // Encolarlos todos juntos hacía que Android perdiera los primeros.
+  let i=0;
+  const siguiente=()=>{
+    if(token!==qid || respondido){ listo(); return; }   // ya respondió: cortamos
+    if(i>=nombres.length){ listo(); return; }
+    const n=nombres[i++];
+    say(n,{cb:()=>setTimeout(siguiente,140)});
+  };
+  // Esperamos a que el motor termine de soltar lo anterior. Si arrancamos
+  // encima, el cancel() se llevaba también el primer nombre.
+  let esperas=0;
+  const arrancar=()=>{
+    if(token!==qid || respondido){ listo(); return; }
+    let libre=true;
+    try{ libre = !speechSynthesis.speaking && !speechSynthesis.pending; }catch(e){}
+    if(libre || esperas>=12){ siguiente(); return; }
+    esperas++; setTimeout(arrancar,60);
+  };
+  arrancar();
+  setTimeout(listo, 14000);   // red de seguridad
 }
 
 /* ---- timer ---- */
